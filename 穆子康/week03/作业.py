@@ -1,4 +1,3 @@
-# 导入需要的工具包
 import random
 import torch
 import torch.nn as nn
@@ -9,9 +8,9 @@ N_SAMPLES = 4000
 MAXLEN = 5
 EMBED_DIM = 16
 HIDDEN_DIM = 32
-LR = 1e-3
+LR = 5e-4
 BATCH_SIZE = 128
-EPOCHS = 15
+EPOCHS = 50
 TRAIN_RATIO = 0.8
 
 random.seed(SEED)
@@ -53,22 +52,49 @@ def encode(sent, vocab, maxlen=MAXLEN):
     ids += [0] * (maxlen - len(ids))
     return ids
 
-# ===================== LSTM 模型=====================
-class TextLSTM(nn.Module):
+# ===================== 模型：只去掉CNN，其余全部保留 =====================
+class FinalModel(nn.Module):
     def __init__(self, vocab_size, num_classes=5):
         super().__init__()
+
+        # 1. Embedding 层
         self.embedding = nn.Embedding(vocab_size, EMBED_DIM, padding_idx=0)
+
+        # 2. LSTM 层
         self.lstm = nn.LSTM(EMBED_DIM, HIDDEN_DIM, batch_first=True)
+
+        # 3. 池化层
+        self.pool = nn.AdaptiveMaxPool1d(1)
+
+        # 4. 归一化层
+        self.norm = nn.LayerNorm(HIDDEN_DIM)
+
+        # 5. Dropout
+        self.dropout = nn.Dropout(0.2)
+
+        # 6. 全连接层
         self.fc = nn.Linear(HIDDEN_DIM, num_classes)
 
     def forward(self, x):
-        x = self.embedding(x)
-        output, _ = self.lstm(x)
-        feat = output[:, -1, :]
+        # 词嵌入
+        x = self.embedding(x)  # [B, 5, 16]
+
+        # LSTM 时序特征
+        out, _ = self.lstm(x)  # [B, 5, 32]
+
+        # 池化
+        out = out.transpose(1, 2)  # [B, 32, 5]
+        feat = self.pool(out).squeeze(-1)  # [B, 32]
+
+        # 归一化 + Dropout
+        feat = self.norm(feat)
+        feat = self.dropout(feat)
+
+        # 分类
         out = self.fc(feat)
         return out
 
-# 计算准确率
+# 评估
 def evaluate(model, test_x, test_y):
     model.eval()
     with torch.no_grad():
@@ -77,59 +103,53 @@ def evaluate(model, test_x, test_y):
         acc = (pred_class == test_y).sum() / len(test_y)
     return acc.item()
 
+# 训练
 def train():
-    # 1. 造数据
     data = build_dataset(N_SAMPLES)
     vocab = build_vocab(data)
 
-    # 2. 全部提前编码成 数字张量
     all_x = []
     all_y = []
     for sent, label in data:
         all_x.append(encode(sent, vocab))
         all_y.append(label)
 
-    # 转成张量
     all_x = torch.tensor(all_x, dtype=torch.long)
     all_y = torch.tensor(all_y, dtype=torch.long)
 
-    # 划分训练/测试
     split = int(len(all_x) * TRAIN_RATIO)
     train_x, test_x = all_x[:split], all_x[split:]
     train_y, test_y = all_y[:split], all_y[split:]
 
-    # 初始化模型、损失、优化器
-    model = TextLSTM(len(vocab))
+    model = FinalModel(len(vocab))
     criterion = nn.CrossEntropyLoss()
+
+    # Adam 优化器
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
-    # 训练
     for epoch in range(EPOCHS):
         model.train()
         total_loss = 0
 
         for start in range(0, len(train_x), BATCH_SIZE):
             end = start + BATCH_SIZE
-            x_batch = train_x[start:end]
-            y_batch = train_y[start:end]
+            xb = train_x[start:end]
+            yb = train_y[start:end]
 
-            # 前向传播 + 损失
-            pred = model(x_batch)
-            loss = criterion(pred, y_batch)
+            pred = model(xb)
+            loss = criterion(pred, yb)
 
-            # 梯度+更新
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
             total_loss += loss.item()
 
-        # 测试准确率
         acc = evaluate(model, test_x, test_y)
         print(f"第 {epoch+1}轮 | loss={total_loss:.4f} | acc={acc:.4f}")
 
-    # 推理演示
-    print("\n=== 推理演示 ===")
+    # 测试
+    print("\n=== 测试结果 ===")
     model.eval()
     test_sents = [
         ["我", "你", "他", "她", "它"],
@@ -140,10 +160,9 @@ def train():
     with torch.no_grad():
         for s in test_sents:
             ids = encode(s, vocab)
-            tensor_x = torch.tensor([ids], dtype=torch.long)
-            out = model(tensor_x)
-            pos = torch.argmax(out).item()
-            print(f"{s}  → 你在第 {pos} 位")
+            x = torch.tensor([ids])
+            pos = torch.argmax(model(x)).item()
+            print(f"{s} -> 你在第 {pos} 位")
 
 if __name__ == "__main__":
     train()
